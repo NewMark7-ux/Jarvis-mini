@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="Jarvis">
+  <meta name="theme-color" content="#060613">
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="style.css">
+  <title>Jarvis</title>
+</head>
+<body>
+  <div id="app" data-state="idle">
+
+    <header>
+      <div class="wordmark">J A R V I S</div>
+      <div class="header-right">
+        <div class="dot"></div>
+        <div class="status-text" id="statusText">офлайн</div>
+        <button class="settings-btn" id="settingsToggle" aria-label="Настройки">⚙</button>
+      </div>
+    </header>
+
+    <div class="settings-panel" id="settingsPanel" hidden>
+      <label>Claude API Key</label>
+      <input type="password" id="apiKey" placeholder="sk-ant-..." autocomplete="off" spellcheck="false">
+      <p class="hint">Без ключа работают базовые офлайн-команды (время, дата, приветствие).</p>
+    </div>
+
+    <main>
+      <div class="orb-area">
+        <div class="orb-wrapper" id="orbWrapper">
+          <div class="orb-outer-ring"></div>
+          <div class="orb-mid-ring"></div>
+          <div class="orb-core">
+            <div class="orb-glare"></div>
+          </div>
+          <div class="orb-pulse-ring"></div>
+        </div>
+        <div class="state-label" id="stateLabel">нажми чтобы говорить</div>
+      </div>
+
+      <div class="chat" id="chat"></div>
+    </main>
+
+    <footer>
+      <button class="mic-btn" id="micBtn">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+          <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+          <line x1="12" y1="19" x2="12" y2="23"/>
+          <line x1="8"  y1="23" x2="16" y2="23"/>
+        </svg>
+        <span id="micLabel">Говорить</span>
+      </button>
+    </footer>
+
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
