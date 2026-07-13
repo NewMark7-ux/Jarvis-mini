@@ -1,26 +1,24 @@
 // ═══════════════════════════════════════════════════════════════
-//  JARVIS v2 — офлайн AI + система скиллов
-//  Модули: ModelManager · SkillsManager · VoiceCore · AgentLoop
+//  JARVIS v2.1 — фиксы: авто-восстановление модели + iOS TTS
 // ═══════════════════════════════════════════════════════════════
 
-// ── Конфиг моделей ──────────────────────────────────────────────
 const MODELS = {
   small: { id: 'onnx-community/Qwen2.5-0.5B-Instruct', label: 'Qwen 0.5B', dtype: 'q4' },
   main:  { id: 'onnx-community/Qwen2.5-1.5B-Instruct', label: 'Qwen 1.5B', dtype: 'q4' }
 };
 
-const SYSTEM = `Ты голосовой ассистент Jarvis. 
+const SYSTEM = `Ты голосовой ассистент Jarvis.
 Отвечай кратко — 1-2 предложения на русском. Только простой текст, без markdown.
-Если пользователь просит создать скилл (функцию), ответь ТОЛЬКО в формате JSON:
+Если пользователь просит создать скилл, ответь ТОЛЬКО в формате JSON:
 {"create_skill":{"name":"...","trigger":"...","description":"...","code":"function(input){ return '...'; }"}}`;
 
 // ── Состояние ────────────────────────────────────────────────────
-let appState     = 'idle';
-let recognition  = null;
-let generator    = null;       // Transformers.js pipeline
-let modelLoaded  = false;
-let modelChoice  = localStorage.getItem('jarvis_model') || 'small';
-let apiKey       = localStorage.getItem('jarvis_key')   || '';
+let appState    = 'idle';
+let recognition = null;
+let generator   = null;
+let modelLoaded = false;
+let modelChoice = localStorage.getItem('jarvis_model') || 'small';
+let apiKey      = localStorage.getItem('jarvis_key')   || '';
 
 // ── Элементы UI ──────────────────────────────────────────────────
 const app            = document.getElementById('app');
@@ -52,8 +50,196 @@ const skillCode      = document.getElementById('skillCode');
 const saveSkillBtn   = document.getElementById('saveSkillBtn');
 const cancelSkillBtn = document.getElementById('cancelSkillBtn');
 
-// Восстановить API ключ
 if (apiKey) { apiKeyInput.value = apiKey; statusText.textContent = 'Claude'; }
+
+// ══════════════════════════════════════════════════════════════════
+//  iOS TTS ФИКС — три уровня защиты
+// ══════════════════════════════════════════════════════════════════
+let speechPrimed = false;
+
+// 1. "Разблокируем" синтез при первом касании пользователя
+function primeSpeech() {
+  if (speechPrimed || !window.speechSynthesis) return;
+  const silent = new SpeechSynthesisUtterance(' ');
+  silent.volume = 0; silent.rate = 10;
+  window.speechSynthesis.speak(silent);
+  speechPrimed = true;
+}
+
+// 2. iOS автоматически паузит синтез — раз в 5 сек возобновляем
+setInterval(() => {
+  if (window.speechSynthesis?.paused) window.speechSynthesis.resume();
+}, 5000);
+
+// 3. Говорить с задержкой и таймаутом-фолбэком
+function speak(text) {
+  return new Promise(resolve => {
+    if (!window.speechSynthesis) { setState('idle'); return resolve(); }
+
+    primeSpeech();
+    window.speechSynthesis.cancel();
+    setState('speaking');
+
+    const run = () => {
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang   = 'ru-RU';
+      u.rate   = 1.0;
+      u.pitch  = 0.88;
+      u.volume = 1.0;
+
+      // Выбираем русский голос если есть
+      const voices  = window.speechSynthesis.getVoices();
+      const ruVoice = voices.find(v => v.lang.startsWith('ru'));
+      if (ruVoice) u.voice = ruVoice;
+
+      let finished = false;
+      const finish = () => {
+        if (!finished) { finished = true; setState('idle'); resolve(); }
+      };
+
+      u.onend   = finish;
+      u.onerror = finish;
+
+      // Таймаут — 70мс/символ + 3с запас (iOS иногда не вызывает onend)
+      setTimeout(finish, Math.max(4000, text.length * 70 + 3000));
+
+      window.speechSynthesis.speak(u);
+    };
+
+    // iOS требует паузу после cancel() перед speak()
+    setTimeout(run, 120);
+  });
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  MODEL MANAGER — авто-восстановление из кэша
+// ══════════════════════════════════════════════════════════════════
+
+// Вызывается при старте: если модель уже скачана — загружает из кэша (быстро, без скачивания)
+async function tryRestoreModel() {
+  const saved = localStorage.getItem('jarvis_model_ready');
+  if (!saved || !MODELS[saved]) return;
+
+  modelChoice = saved;
+  modelStatus.textContent = `⏳ Восстановление ${MODELS[saved].label}...`;
+  downloadBtn.textContent = '⏳ Загрузка из кэша...';
+  downloadBtn.disabled    = true;
+  progressWrap.hidden     = false;
+  progressFill.style.width = '0%';
+  progressLabel.textContent = 'читаю кэш...';
+
+  try {
+    const { pipeline, env } = await import(
+      'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3'
+    );
+    env.useBrowserCache  = true;
+    env.allowLocalModels = false;
+
+    const cfg = MODELS[saved];
+    generator = await pipeline('text-generation', cfg.id, {
+      dtype:  cfg.dtype,
+      device: 'wasm',
+      progress_callback: (p) => {
+        if (p.status === 'progress') {
+          const pct = Math.round(p.progress || 0);
+          progressFill.style.width   = pct + '%';
+          progressLabel.textContent  = `${pct}%`;
+        }
+      }
+    });
+
+    modelLoaded = true;
+    progressFill.style.width  = '100%';
+    progressLabel.textContent = '100%';
+    statusText.textContent    = cfg.label;
+    modelStatus.textContent   = `✓ ${cfg.label} — офлайн активен`;
+    downloadBtn.textContent   = `✓ ${cfg.label} активна`;
+    addMsg(`✓ Модель ${cfg.label} восстановлена из кэша — работаю офлайн`, 'system');
+
+    // Обновляем выбор кнопок
+    if (saved === 'main') {
+      chooseMain.classList.add('active');
+      chooseSmall.classList.remove('active');
+    }
+
+  } catch (e) {
+    // Кэш устарел или ошибка — сбрасываем
+    localStorage.removeItem('jarvis_model_ready');
+    downloadBtn.disabled    = false;
+    downloadBtn.textContent = '⬇ Загрузить модель офлайн';
+    progressWrap.hidden     = true;
+    modelStatus.textContent = '⚠ Кэш не найден — загрузи снова';
+  }
+}
+
+// Скачать (или переинициализировать) модель
+async function downloadModel() {
+  downloadBtn.disabled     = true;
+  progressWrap.hidden      = false;
+  progressFill.style.width = '0%';
+  modelStatus.textContent  = '';
+
+  try {
+    const { pipeline, env } = await import(
+      'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3'
+    );
+    env.useBrowserCache  = true;
+    env.allowLocalModels = false;
+
+    const cfg = MODELS[modelChoice];
+    modelStatus.textContent = `Загрузка ${cfg.label}... (первый раз долго)`;
+
+    generator = await pipeline('text-generation', cfg.id, {
+      dtype:  cfg.dtype,
+      device: 'wasm',
+      progress_callback: (p) => {
+        if (p.status === 'progress') {
+          const pct = Math.round(p.progress || 0);
+          progressFill.style.width  = pct + '%';
+          progressLabel.textContent = `${pct}%`;
+          // Обновляем каждые 5% чтобы не тормозило
+        }
+      }
+    });
+
+    // ✅ КЛЮЧЕВОЙ ФИКС: сохраняем что модель скачана
+    localStorage.setItem('jarvis_model_ready', modelChoice);
+
+    modelLoaded = true;
+    progressFill.style.width  = '100%';
+    progressLabel.textContent = '100% — готово!';
+    statusText.textContent    = cfg.label;
+    modelStatus.textContent   = `✓ ${cfg.label} сохранена — офлайн активен`;
+    downloadBtn.textContent   = `✓ ${cfg.label} активна`;
+
+    addMsg(`✓ Модель ${cfg.label} загружена и сохранена в кэше!`, 'system');
+    await speak('Офлайн модель загружена, теперь работаю без интернета.');
+
+  } catch (e) {
+    modelStatus.textContent = '❌ Ошибка: ' + e.message;
+    downloadBtn.disabled    = false;
+    downloadBtn.textContent = '⬇ Попробовать снова';
+  }
+}
+
+// Генерация ответа локальной моделью
+async function generateLocal(text) {
+  if (!generator) return null;
+  try {
+    const messages = [
+      { role: 'system', content: SYSTEM },
+      { role: 'user',   content: text   }
+    ];
+    const out = await generator(messages, {
+      max_new_tokens: 180,
+      do_sample:      true,
+      temperature:    0.7,
+    });
+    return out[0].generated_text.at(-1).content?.trim() || null;
+  } catch (e) {
+    return null;
+  }
+}
 
 // ══════════════════════════════════════════════════════════════════
 //  SKILLS MANAGER
@@ -64,8 +250,8 @@ const SkillsManager = {
 
   add(name, trigger, description, code) {
     const skills = this.load();
-    const idx = skills.findIndex(s => s.name === name);
-    const skill = { name, trigger: trigger.toLowerCase(), description, code, created: Date.now() };
+    const idx    = skills.findIndex(s => s.name === name);
+    const skill  = { name, trigger: trigger.toLowerCase(), description, code, created: Date.now() };
     if (idx >= 0) skills[idx] = skill; else skills.push(skill);
     this.save(skills);
     renderSkills();
@@ -77,18 +263,12 @@ const SkillsManager = {
     renderSkills();
   },
 
-  // Возвращает результат первого совпавшего скилла, или null
   tryRun(text) {
-    const skills = this.load();
     const t = text.toLowerCase();
-    for (const skill of skills) {
-      if (t.includes(skill.trigger)) {
-        try {
-          const fn = new Function('input', skill.code);
-          return fn(text);
-        } catch (e) {
-          return `Ошибка в скилле "${skill.name}": ${e.message}`;
-        }
+    for (const s of this.load()) {
+      if (t.includes(s.trigger)) {
+        try { return new Function('input', s.code)(text); }
+        catch (e) { return `Ошибка скилла «${s.name}»: ${e.message}`; }
       }
     }
     return null;
@@ -97,7 +277,7 @@ const SkillsManager = {
 
 function renderSkills() {
   const skills = SkillsManager.load();
-  if (skills.length === 0) {
+  if (!skills.length) {
     skillsList.innerHTML = '<div class="empty-hint">Нет скиллов — скажи «создай скилл» или добавь вручную</div>';
     return;
   }
@@ -110,87 +290,24 @@ function renderSkills() {
       <button class="skill-del" data-name="${s.name}">✕</button>
     </div>
   `).join('');
-  skillsList.querySelectorAll('.skill-del').forEach(btn =>
-    btn.addEventListener('click', () => SkillsManager.remove(btn.dataset.name))
+  skillsList.querySelectorAll('.skill-del').forEach(b =>
+    b.addEventListener('click', () => SkillsManager.remove(b.dataset.name))
   );
 }
 
 // ══════════════════════════════════════════════════════════════════
-//  MODEL MANAGER
-// ══════════════════════════════════════════════════════════════════
-const ModelManager = {
-  async download() {
-    downloadBtn.disabled = true;
-    progressWrap.hidden  = false;
-    modelStatus.textContent = '';
-
-    try {
-      // Динамический импорт — грузим Transformers.js только когда нужно
-      const { pipeline, env } = await import(
-        'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3'
-      );
-
-      env.useBrowserCache   = true;   // Кэш в браузере → офлайн
-      env.allowLocalModels  = false;
-
-      const cfg = MODELS[modelChoice];
-      modelStatus.textContent = `Загрузка ${cfg.label}...`;
-
-      generator = await pipeline('text-generation', cfg.id, {
-        dtype:  cfg.dtype,
-        device: 'wasm',
-        progress_callback: (p) => {
-          if (p.status === 'progress') {
-            const pct = Math.round(p.progress || 0);
-            progressFill.style.width = pct + '%';
-            progressLabel.textContent = `${pct}% · ${cfg.label}`;
-          }
-        }
-      });
-
-      modelLoaded = true;
-      progressFill.style.width = '100%';
-      progressLabel.textContent = '100% · готово';
-      modelStatus.textContent  = `✓ ${cfg.label} загружена — работает офлайн`;
-      statusText.textContent   = cfg.label;
-      downloadBtn.textContent  = '✓ Модель загружена';
-
-    } catch (e) {
-      modelStatus.textContent = '❌ Ошибка: ' + e.message;
-      downloadBtn.disabled    = false;
-      downloadBtn.textContent = '⬇ Попробовать снова';
-    }
-  },
-
-  async generate(text) {
-    if (!generator) return null;
-    const messages = [
-      { role: 'system', content: SYSTEM },
-      { role: 'user',   content: text   }
-    ];
-    const out = await generator(messages, {
-      max_new_tokens: 180,
-      do_sample: true,
-      temperature: 0.7,
-    });
-    return out[0].generated_text.at(-1).content?.trim() || null;
-  }
-};
-
-// ══════════════════════════════════════════════════════════════════
-//  ОФЛАЙН КОМАНДЫ (без модели)
+//  OFFLINE КОМАНДЫ
 // ══════════════════════════════════════════════════════════════════
 function offlineReply(text) {
-  const t = text.toLowerCase().trim();
-  if (/(\bвремя\b|который час|сколько время)/.test(t))
+  const t = text.toLowerCase();
+  if (/(\bвремя\b|который час)/.test(t))
     return `Сейчас ${new Date().toLocaleTimeString('ru-RU', { hour:'2-digit', minute:'2-digit' })}.`;
   if (/(\bдата\b|какое число|какой день|сегодня)/.test(t))
-    return `Сегодня ${new Date().toLocaleDateString('ru-RU', { weekday:'long', day:'numeric', month:'long', year:'numeric' })}.`;
-  if (/привет|здравствуй|хай/.test(t)) return 'Привет! Чем могу помочь?';
-  if (/как (ты|дела|жизнь)/.test(t))   return 'Отлично, готов работать!';
+    return `Сегодня ${new Date().toLocaleDateString('ru-RU', { weekday:'long', day:'numeric', month:'long' })}.`;
+  if (/привет|здравствуй|хай/.test(t))   return 'Привет! Чем могу помочь?';
+  if (/как (ты|дела)/.test(t))            return 'Отлично, готов работать!';
   if (/(кто ты|как тебя зовут)/.test(t)) return 'Я Jarvis, твой голосовой ассистент.';
-  if (/спасибо|благодарю/.test(t))      return 'Пожалуйста!';
-  if (/пока|до свидания/.test(t))       return 'До встречи!';
+  if (/спасибо|благодарю/.test(t))        return 'Пожалуйста!';
   return null;
 }
 
@@ -212,93 +329,60 @@ async function askClaude(text) {
 }
 
 // ══════════════════════════════════════════════════════════════════
-//  SPEECH SYNTHESIS
+//  ПАРСИНГ ОТВЕТА — автосоздание скиллов
 // ══════════════════════════════════════════════════════════════════
-function speak(text) {
-  return new Promise(resolve => {
-    if (!window.speechSynthesis) return resolve();
-    window.speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text);
-    u.lang = 'ru-RU'; u.rate = 1.05; u.pitch = 0.88; u.volume = 1;
-    const ruVoice = window.speechSynthesis.getVoices().find(v => v.lang.startsWith('ru'));
-    if (ruVoice) u.voice = ruVoice;
-    setState('speaking');
-    u.onend = u.onerror = () => { setState('idle'); resolve(); };
-    window.speechSynthesis.speak(u);
-  });
-}
-
-// ══════════════════════════════════════════════════════════════════
-//  ОБРАБОТКА ОТВЕТА — автосоздание скиллов
-// ══════════════════════════════════════════════════════════════════
-async function handleReply(rawReply) {
-  // Проверяем: не хочет ли модель создать скилл?
-  const jsonMatch = rawReply.match(/\{"create_skill":\{.*?\}\}/s);
-  if (jsonMatch) {
+async function handleReply(raw) {
+  const m = raw.match(/\{"create_skill":\{.*?\}\}/s);
+  if (m) {
     try {
-      const parsed = JSON.parse(jsonMatch[0]);
-      const cs = parsed.create_skill;
-      SkillsManager.add(cs.name, cs.trigger, cs.description, cs.code);
-      const msg = `✓ Скилл «${cs.name}» создан! Теперь скажи «${cs.trigger}» чтобы использовать.`;
-      addMsg(msg, 'jarvis');
-      await speak(msg);
-      return;
-    } catch { /* не JSON — отвечаем как обычно */ }
+      const cs = JSON.parse(m[0]).create_skill;
+      SkillsManager.add(cs.name, cs.trigger, cs.description || '', cs.code);
+      const msg = `✓ Скилл «${cs.name}» создан! Скажи «${cs.trigger}» чтобы использовать.`;
+      addMsg(msg, 'jarvis'); await speak(msg); return;
+    } catch { /* обычный ответ */ }
   }
-  addMsg(rawReply, 'jarvis');
-  await speak(rawReply);
+  addMsg(raw, 'jarvis');
+  await speak(raw);
 }
 
 // ══════════════════════════════════════════════════════════════════
-//  ОСНОВНОЙ ЦИКЛ АГЕНТА
+//  ОСНОВНОЙ ЦИКЛ
 // ══════════════════════════════════════════════════════════════════
 async function handleInput(text) {
   addMsg(text, 'user');
   setState('thinking');
 
-  // 1. Скиллы (мгновенно, офлайн)
-  const skillResult = SkillsManager.tryRun(text);
-  if (skillResult !== null) {
-    addMsg(skillResult, 'jarvis');
-    await speak(skillResult);
-    return;
-  }
+  const skill = SkillsManager.tryRun(text);
+  if (skill !== null) { addMsg(skill, 'jarvis'); await speak(skill); return; }
 
-  // 2. Встроенные быстрые команды
   const quick = offlineReply(text);
   if (quick) { addMsg(quick, 'jarvis'); await speak(quick); return; }
 
-  // 3. Локальная модель
   if (modelLoaded) {
-    const local = await ModelManager.generate(text);
+    const local = await generateLocal(text);
     if (local) { await handleReply(local); return; }
   }
 
-  // 4. Claude API
   if (apiKey) {
     const cloud = await askClaude(text);
     if (cloud) { await handleReply(cloud); return; }
   }
 
-  // 5. Fallback
-  const fallback = modelLoaded
-    ? 'Не смог ответить — попробуй ещё раз.'
-    : 'Загрузи офлайн модель в настройках ⚙, или добавь Claude API ключ.';
-  addMsg(fallback, 'jarvis');
-  await speak(fallback);
+  const fb = modelLoaded
+    ? 'Не смог ответить — попробуй переформулировать.'
+    : 'Загрузи модель в настройках ⚙ для офлайн ответов.';
+  addMsg(fb, 'jarvis'); await speak(fb);
 }
 
 // ══════════════════════════════════════════════════════════════════
 //  STATE MACHINE
 // ══════════════════════════════════════════════════════════════════
-const STATE_LABELS = { idle:'нажми чтобы говорить', listening:'слушаю...', thinking:'думаю...', speaking:'говорю...' };
-const MIC_LABELS   = { idle:'Говорить', listening:'Стоп', thinking:'...', speaking:'Прервать' };
-
+const SL = { idle:'нажми чтобы говорить', listening:'слушаю...', thinking:'думаю...', speaking:'говорю...' };
+const ML = { idle:'Говорить', listening:'Стоп', thinking:'...', speaking:'Прервать' };
 function setState(s) {
-  appState = s;
-  app.dataset.state = s;
-  stateLabel.textContent = STATE_LABELS[s] ?? s;
-  micLabel.textContent   = MIC_LABELS[s]   ?? s;
+  appState = s; app.dataset.state = s;
+  stateLabel.textContent = SL[s] ?? s;
+  micLabel.textContent   = ML[s] ?? s;
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -307,10 +391,11 @@ function setState(s) {
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 
 function startListening() {
+  primeSpeech(); // разблокируем аудио при каждом нажатии
   if (appState === 'listening') { stopListening(); return; }
   if (appState === 'speaking')  { window.speechSynthesis?.cancel(); setState('idle'); return; }
   if (appState === 'thinking')  { return; }
-  if (!SR) { addMsg('⚠️ Web Speech API не поддерживается. Используй Safari 14.5+ или Orion.', 'system'); return; }
+  if (!SR) { addMsg('⚠️ Web Speech API не поддерживается. Нужен Safari 14.5+ или Orion.', 'system'); return; }
 
   recognition = new SR();
   recognition.lang = 'ru-RU';
@@ -324,8 +409,8 @@ function startListening() {
     handleInput(txt);
   };
   recognition.onerror  = (e) => {
-    if      (e.error === 'not-allowed') addMsg('⚠️ Нет доступа к микрофону.', 'system');
-    else if (e.error === 'no-speech')   addMsg('Не услышал — попробуй ещё раз.', 'system');
+    if      (e.error === 'not-allowed') addMsg('⚠️ Нет доступа к микрофону. Разреши в настройках.', 'system');
+    else if (e.error === 'no-speech')   addMsg('Не услышал — нажми ещё раз.', 'system');
     else if (e.error !== 'aborted')     addMsg(`⚠️ Ошибка: ${e.error}`, 'system');
     stopListening();
   };
@@ -351,17 +436,14 @@ function addMsg(text, role = 'jarvis') {
 }
 
 // ══════════════════════════════════════════════════════════════════
-//  ПРИВЯЗКА СОБЫТИЙ
+//  СОБЫТИЯ
 // ══════════════════════════════════════════════════════════════════
-
-// Микрофон
 micBtn.addEventListener('click', startListening);
 orbWrapper.addEventListener('click', startListening);
 
-// Настройки
 settingsToggle.addEventListener('click', () => {
   settingsPanel.hidden = !settingsPanel.hidden;
-  skillsPanel.hidden = true;
+  skillsPanel.hidden   = true;
 });
 apiKeyInput.addEventListener('change', () => {
   apiKey = apiKeyInput.value.trim();
@@ -369,34 +451,26 @@ apiKeyInput.addEventListener('change', () => {
   if (!modelLoaded) statusText.textContent = apiKey ? 'Claude' : 'офлайн';
 });
 
-// Выбор модели
 chooseSmall.addEventListener('click', () => {
   modelChoice = 'small';
   localStorage.setItem('jarvis_model', 'small');
-  chooseSmall.classList.add('active');
-  chooseMain.classList.remove('active');
+  chooseSmall.classList.add('active'); chooseMain.classList.remove('active');
 });
 chooseMain.addEventListener('click', () => {
   modelChoice = 'main';
   localStorage.setItem('jarvis_model', 'main');
-  chooseMain.classList.add('active');
-  chooseSmall.classList.remove('active');
+  chooseMain.classList.add('active'); chooseSmall.classList.remove('active');
 });
-// Восстановить выбор
 if (modelChoice === 'main') {
-  chooseMain.classList.add('active');
-  chooseSmall.classList.remove('active');
+  chooseMain.classList.add('active'); chooseSmall.classList.remove('active');
 }
 
-// Скачать модель
-downloadBtn.addEventListener('click', () => ModelManager.download());
+downloadBtn.addEventListener('click', downloadModel);
 
-// Табы
 tabChat.addEventListener('click', () => {
   skillsPanel.hidden   = true;
   settingsPanel.hidden = true;
-  tabChat.classList.add('active');
-  tabSkills.classList.remove('active');
+  tabChat.classList.add('active'); tabSkills.classList.remove('active');
 });
 tabSkills.addEventListener('click', () => {
   skillsPanel.hidden   = !skillsPanel.hidden;
@@ -405,7 +479,6 @@ tabSkills.addEventListener('click', () => {
   renderSkills();
 });
 
-// Скиллы — форма
 addSkillBtn.addEventListener('click', () => {
   skillForm.hidden = !skillForm.hidden;
   if (!skillForm.hidden) skillName.focus();
@@ -425,16 +498,19 @@ saveSkillBtn.addEventListener('click', () => {
   addMsg(`✓ Скилл «${n}» добавлен!`, 'system');
 });
 
-// ── Service Worker ───────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+//  ИНИЦИАЛИЗАЦИЯ
+// ══════════════════════════════════════════════════════════════════
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('./sw.js').catch(() => {});
 }
 
-// ── Предзагрузка голосов ────────────────────────────────────────
 if (window.speechSynthesis) {
   window.speechSynthesis.getVoices();
   window.speechSynthesis.addEventListener('voiceschanged', () => window.speechSynthesis.getVoices());
 }
 
-// ── Стартовое сообщение ─────────────────────────────────────────
 addMsg('Нажми на орб или кнопку ниже чтобы говорить', 'system');
+
+// Авто-восстановление модели из кэша при старте
+tryRestoreModel();
