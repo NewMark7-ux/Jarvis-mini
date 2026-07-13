@@ -13,41 +13,76 @@
   <title>Jarvis</title>
 </head>
 <body>
-  <div id="app" data-state="idle">
+<div id="app" data-state="idle">
 
-    <header>
-      <div class="wordmark">J A R V I S</div>
-      <div class="header-right">
-        <div class="dot"></div>
-        <div class="status-text" id="statusText">офлайн</div>
-        <button class="settings-btn" id="settingsToggle" aria-label="Настройки">⚙</button>
-      </div>
-    </header>
-
-    <div class="settings-panel" id="settingsPanel" hidden>
-      <label>Claude API Key</label>
-      <input type="password" id="apiKey" placeholder="sk-ant-..." autocomplete="off" spellcheck="false">
-      <p class="hint">Без ключа работают базовые офлайн-команды (время, дата, приветствие).</p>
+  <!-- HEADER -->
+  <header>
+    <div class="wordmark">J A R V I S</div>
+    <div class="header-right">
+      <div class="dot" id="dot"></div>
+      <div class="status-text" id="statusText">офлайн</div>
+      <button class="icon-btn" id="settingsToggle" title="Настройки">⚙</button>
     </div>
+  </header>
 
-    <main>
-      <div class="orb-area">
-        <div class="orb-wrapper" id="orbWrapper">
-          <div class="orb-outer-ring"></div>
-          <div class="orb-mid-ring"></div>
-          <div class="orb-core">
-            <div class="orb-glare"></div>
-          </div>
-          <div class="orb-pulse-ring"></div>
-        </div>
-        <div class="state-label" id="stateLabel">нажми чтобы говорить</div>
+  <!-- SETTINGS PANEL -->
+  <div class="panel" id="settingsPanel" hidden>
+    <div class="panel-row">
+      <label>Claude API Key</label>
+      <input type="password" id="apiKey" placeholder="sk-ant-... (необязательно)" autocomplete="off">
+    </div>
+    <div class="panel-row">
+      <label>Модель для офлайн</label>
+      <div class="model-choice">
+        <button class="choice-btn active" id="chooseSmall">Qwen 0.5B · ~500 МБ</button>
+        <button class="choice-btn" id="chooseMain">Qwen 1.5B · ~1 ГБ</button>
       </div>
+    </div>
+    <button class="action-btn" id="downloadBtn">⬇ Загрузить модель офлайн</button>
+    <div class="progress-wrap" id="progressWrap" hidden>
+      <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+      <div class="progress-label" id="progressLabel">0%</div>
+    </div>
+    <div class="model-status" id="modelStatus"></div>
+  </div>
 
-      <div class="chat" id="chat"></div>
-    </main>
+  <!-- SKILLS PANEL -->
+  <div class="panel" id="skillsPanel" hidden>
+    <div class="skills-header">
+      <span>Скиллы агента</span>
+      <button class="icon-btn" id="addSkillBtn">＋</button>
+    </div>
+    <div id="skillsList"><div class="empty-hint">Нет скиллов — скажи «создай скилл» или добавь вручную</div></div>
+    <div class="skill-form" id="skillForm" hidden>
+      <input id="skillName"    placeholder="Название (напр. напомни)" class="skill-input">
+      <input id="skillTrigger" placeholder="Триггер (слово в команде)" class="skill-input">
+      <textarea id="skillCode" placeholder="JS код: function(input) { return 'результат'; }" class="skill-textarea"></textarea>
+      <div class="skill-form-btns">
+        <button class="action-btn" id="saveSkillBtn">Сохранить</button>
+        <button class="cancel-btn" id="cancelSkillBtn">Отмена</button>
+      </div>
+    </div>
+  </div>
 
-    <footer>
-      <button class="mic-btn" id="micBtn">
+  <!-- MAIN -->
+  <main>
+    <div class="orb-area">
+      <div class="orb-wrapper" id="orbWrapper">
+        <div class="orb-outer-ring"></div>
+        <div class="orb-mid-ring"></div>
+        <div class="orb-core"><div class="orb-glare"></div></div>
+        <div class="orb-pulse-ring"></div>
+      </div>
+      <div class="state-label" id="stateLabel">нажми чтобы говорить</div>
+    </div>
+    <div class="chat" id="chat"></div>
+  </main>
+
+  <!-- FOOTER -->
+  <footer>
+    <div class="footer-tabs">
+      <button class="tab-btn active" id="tabChat">💬</button>
+      <button class="tab-btn mic-center" id="micBtn">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
              stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
@@ -55,11 +90,13 @@
           <line x1="12" y1="19" x2="12" y2="23"/>
           <line x1="8"  y1="23" x2="16" y2="23"/>
         </svg>
-        <span id="micLabel">Говорить</span>
       </button>
-    </footer>
+      <button class="tab-btn" id="tabSkills">🧩</button>
+    </div>
+    <div class="mic-label" id="micLabel">Говорить</div>
+  </footer>
 
-  </div>
-  <script src="app.js"></script>
+</div>
+<script type="module" src="app.js"></script>
 </body>
 </html>
