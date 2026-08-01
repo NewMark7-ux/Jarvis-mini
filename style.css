@@ -166,3 +166,12 @@ footer{padding:10px 20px 14px;border-top:1px solid var(--border);
 .mic-label{font-size:11px;color:var(--dim);letter-spacing:0.5px}
 [data-state="listening"] .mic-label{color:var(--cyan)}
 [data-state="speaking"]  .mic-label{color:var(--green)}
+
+/* Новые элементы v3 */
+.section-title{font-size:11px;color:var(--accent);text-transform:uppercase;
+  letter-spacing:1px;font-weight:700;margin-top:4px}
+.panel-hint{font-size:11px;color:var(--dim);line-height:1.5}
+.link-hint a{color:var(--cyan);text-decoration:none}
+.link-hint a:active{opacity:0.7}
+.file-row{display:flex;gap:8px}
+.file-row .action-btn{flex:1}

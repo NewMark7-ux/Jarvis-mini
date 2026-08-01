@@ -15,38 +15,51 @@
 <body>
 <div id="app" data-state="idle">
 
-  <!-- HEADER -->
   <header>
     <div class="wordmark">J A R V I S</div>
     <div class="header-right">
-      <div class="dot" id="dot"></div>
+      <div class="dot"></div>
       <div class="status-text" id="statusText">офлайн</div>
-      <button class="icon-btn" id="settingsToggle" title="Настройки">⚙</button>
+      <button class="icon-btn" id="settingsToggle">⚙</button>
     </div>
   </header>
 
-  <!-- SETTINGS PANEL -->
+  <!-- НАСТРОЙКИ -->
   <div class="panel" id="settingsPanel" hidden>
     <div class="panel-row">
-      <label>Claude API Key</label>
-      <input type="password" id="apiKey" placeholder="sk-ant-... (необязательно)" autocomplete="off">
+      <label>Claude API Key (необязательно)</label>
+      <input type="password" id="apiKey" placeholder="sk-ant-..." autocomplete="off">
     </div>
-    <div class="panel-row">
-      <label>Модель для офлайн</label>
-      <div class="model-choice">
-        <button class="choice-btn active" id="chooseSmall">Qwen 0.5B · ~500 МБ</button>
-        <button class="choice-btn" id="chooseMain">Qwen 1.5B · ~1 ГБ</button>
-      </div>
+
+    <!-- МОДЕЛЬ: выбор файла -->
+    <div class="section-title">🧠 Языковая модель</div>
+    <div class="panel-hint">Скачай GGUF модель отдельно и открой здесь — сохранится навсегда</div>
+    <div class="file-row">
+      <button class="action-btn" id="pickModelBtn">📂 Открыть GGUF файл</button>
+      <input type="file" id="modelFilePicker" accept=".gguf,.bin" hidden>
     </div>
-    <button class="action-btn" id="downloadBtn">⬇ Загрузить модель офлайн</button>
-    <div class="progress-wrap" id="progressWrap" hidden>
-      <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
-      <div class="progress-label" id="progressLabel">0%</div>
+    <div class="progress-wrap" id="modelProgressWrap" hidden>
+      <div class="progress-bar"><div class="progress-fill" id="modelProgressFill"></div></div>
+      <div class="progress-label" id="modelProgressLabel">Инициализация...</div>
     </div>
     <div class="model-status" id="modelStatus"></div>
+    <div class="panel-hint link-hint">
+      Скачать модели: <a href="https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf" target="_blank">Qwen 0.5B (~400 МБ)</a>
+      · <a href="https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf" target="_blank">Qwen 1.5B (~1 ГБ)</a>
+    </div>
+
+    <!-- TTS: голос -->
+    <div class="section-title">🔊 Голос (офлайн TTS)</div>
+    <div class="panel-hint">Русский голос — работает без Safari, без интернета, на Android</div>
+    <button class="action-btn" id="ttsDownloadBtn">⬇ Загрузить голос (~270 МБ)</button>
+    <div class="progress-wrap" id="ttsProgressWrap" hidden>
+      <div class="progress-bar"><div class="progress-fill" id="ttsProgressFill"></div></div>
+      <div class="progress-label" id="ttsProgressLabel">0%</div>
+    </div>
+    <div class="model-status" id="ttsStatus"></div>
   </div>
 
-  <!-- SKILLS PANEL -->
+  <!-- СКИЛЛЫ -->
   <div class="panel" id="skillsPanel" hidden>
     <div class="skills-header">
       <span>Скиллы агента</span>
@@ -54,9 +67,9 @@
     </div>
     <div id="skillsList"><div class="empty-hint">Нет скиллов — скажи «создай скилл» или добавь вручную</div></div>
     <div class="skill-form" id="skillForm" hidden>
-      <input id="skillName"    placeholder="Название (напр. напомни)" class="skill-input">
+      <input id="skillName"    placeholder="Название" class="skill-input">
       <input id="skillTrigger" placeholder="Триггер (слово в команде)" class="skill-input">
-      <textarea id="skillCode" placeholder="JS код: function(input) { return 'результат'; }" class="skill-textarea"></textarea>
+      <textarea id="skillCode" placeholder="function(input){ return 'ответ'; }" class="skill-textarea"></textarea>
       <div class="skill-form-btns">
         <button class="action-btn" id="saveSkillBtn">Сохранить</button>
         <button class="cancel-btn" id="cancelSkillBtn">Отмена</button>
@@ -64,7 +77,6 @@
     </div>
   </div>
 
-  <!-- MAIN -->
   <main>
     <div class="orb-area">
       <div class="orb-wrapper" id="orbWrapper">
@@ -78,7 +90,6 @@
     <div class="chat" id="chat"></div>
   </main>
 
-  <!-- FOOTER -->
   <footer>
     <div class="footer-tabs">
       <button class="tab-btn active" id="tabChat">💬</button>
