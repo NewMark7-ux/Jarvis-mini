@@ -529,7 +529,24 @@ btnSkills.addEventListener('click',()=>{
 pickModelBtn.addEventListener('click',()=>modelFilePicker.click());
 modelFilePicker.addEventListener('change',async e=>{
   const f=e.target.files?.[0]; if(!f) return;
-  await loadGGUF(f,f.name); modelFilePicker.value='';
+  modelFilePicker.value='';
+
+  // Проверка: GGUF начинается с байт 47 47 55 46 ("GGUF")
+  try {
+    const buf  = await f.slice(0,4).arrayBuffer();
+    const b    = new Uint8Array(buf);
+    const isGGUF = b[0]===0x47&&b[1]===0x47&&b[2]===0x55&&b[3]===0x46;
+    const nameOk = /\.(gguf|bin|ggml)$/i.test(f.name);
+
+    if (!isGGUF && !nameOk) {
+      modelStatus.textContent='⚠️ Это не GGUF файл — выбери правильный файл модели';
+      return;
+    }
+  } catch {
+    // Не удалось прочесть — всё равно пробуем загрузить
+  }
+
+  await loadGGUF(f, f.name);
 });
 clearModelBtn.addEventListener('click',async()=>{
   if(!confirm('Удалить сохранённую модель из памяти?')) return;
