@@ -1,347 +1,210 @@
 // ═══════════════════════════════════════════════════════════════
-//  JARVIS v3 — GGUF файловая модель + офлайн TTS (mms-tts-rus)
+//  JARVIS v4 — офлайн, чат + голос, история, скиллы
 // ═══════════════════════════════════════════════════════════════
 
-const SYSTEM = `Ты голосовой ассистент Jarvis.
+const SYS = `Ты офлайн голосовой ассистент Jarvis.
 Отвечай кратко — 1-2 предложения на русском. Только простой текст, без markdown.
-Если просят создать скилл, ответь ТОЛЬКО в JSON:
-{"create_skill":{"name":"...","trigger":"...","code":"function(input){ return '...'; }"}}`;
+Если просят создать скилл — ответь ТОЛЬКО JSON:
+{"create_skill":{"name":"...","trigger":"триггер1,триггер2","code":"const q=input.trim();return q;"}}`;
 
-// Формат промпта для Qwen2.5-Instruct (ChatML)
-const buildPrompt = (userText) =>
-  `<|im_start|>system\n${SYSTEM}<|im_end|>\n<|im_start|>user\n${userText}<|im_end|>\n<|im_start|>assistant\n`;
+const buildPrompt = t =>
+  `<|im_start|>system\n${SYS}<|im_end|>\n<|im_start|>user\n${t}<|im_end|>\n<|im_start|>assistant\n`;
 
-// wllama CDN (single-thread — работает без SharedArrayBuffer)
-const WLLAMA = {
-  'single-thread/wllama.js':   'https://cdn.jsdelivr.net/npm/@wllama/wllama/dist/single-thread/wllama.js',
-  'single-thread/wllama.wasm': 'https://cdn.jsdelivr.net/npm/@wllama/wllama/dist/single-thread/wllama.wasm',
-};
+const AsyncFn = Object.getPrototypeOf(async function(){}).constructor;
 
-// ── Состояние ─────────────────────────────────────────────────
-let appState    = 'idle';
-let recognition = null;
-let llm         = null;       // wllama instance
-let ttsEngine   = null;       // Transformers.js TTS pipeline
-let audioCtx    = null;       // Web Audio API context
-let llmReady    = false;
-let ttsReady    = false;
-let apiKey      = localStorage.getItem('jarvis_key') || '';
+// ── Состояние ────────────────────────────────────────────────
+let appState   = 'idle';
+let recognition= null;
+let llm        = null;
+let ttsEngine  = null;
+let audioCtx   = null;
+let llmReady   = false;
+let ttsReady   = false;
+let editingSkillName = null; // null = новый скилл, строка = редактирование
 
-// ── UI ────────────────────────────────────────────────────────
-const app             = document.getElementById('app');
-const chat            = document.getElementById('chat');
-const micBtn          = document.getElementById('micBtn');
-const micLabel        = document.getElementById('micLabel');
-const stateLabel      = document.getElementById('stateLabel');
-const orbWrapper      = document.getElementById('orbWrapper');
-const statusText      = document.getElementById('statusText');
-const settingsToggle  = document.getElementById('settingsToggle');
-const settingsPanel   = document.getElementById('settingsPanel');
-const apiKeyInput     = document.getElementById('apiKey');
-const pickModelBtn    = document.getElementById('pickModelBtn');
-const modelFilePicker = document.getElementById('modelFilePicker');
-const modelProgressWrap  = document.getElementById('modelProgressWrap');
-const modelProgressFill  = document.getElementById('modelProgressFill');
-const modelProgressLabel = document.getElementById('modelProgressLabel');
-const modelStatus     = document.getElementById('modelStatus');
-const ttsDownloadBtn  = document.getElementById('ttsDownloadBtn');
-const ttsProgressWrap = document.getElementById('ttsProgressWrap');
-const ttsProgressFill = document.getElementById('ttsProgressFill');
-const ttsProgressLabel= document.getElementById('ttsProgressLabel');
-const ttsStatus       = document.getElementById('ttsStatus');
-const tabChat         = document.getElementById('tabChat');
-const tabSkills       = document.getElementById('tabSkills');
-const skillsPanel     = document.getElementById('skillsPanel');
-const skillsList      = document.getElementById('skillsList');
-const addSkillBtn     = document.getElementById('addSkillBtn');
-const skillForm       = document.getElementById('skillForm');
-const skillName       = document.getElementById('skillName');
-const skillTrigger    = document.getElementById('skillTrigger');
-const skillCode       = document.getElementById('skillCode');
-const saveSkillBtn    = document.getElementById('saveSkillBtn');
-const cancelSkillBtn  = document.getElementById('cancelSkillBtn');
-
-if (apiKey) { apiKeyInput.value = apiKey; statusText.textContent = 'Claude'; }
+// ── UI ───────────────────────────────────────────────────────
+const $  = id => document.getElementById(id);
+const app           = $('app');
+const chat          = $('chat');
+const textInput     = $('textInput');
+const sendBtn       = $('sendBtn');
+const micBtn        = $('micBtn');
+const stateLbl      = $('stateLbl');
+const statusText    = $('statusText');
+const settingsPanel = $('settingsPanel');
+const skillsPanel   = $('skillsPanel');
+const btnSettings   = $('btnSettings');
+const btnSkills     = $('btnSkills');
+const pickModelBtn  = $('pickModelBtn');
+const clearModelBtn = $('clearModelBtn');
+const modelFilePicker=$('modelFilePicker');
+const modelProgressWrap=$('modelProgressWrap');
+const modelProgressFill=$('modelProgressFill');
+const modelProgressLabel=$('modelProgressLabel');
+const modelStatus   = $('modelStatus');
+const ttsBtn        = $('ttsBtn');
+const ttsProgressWrap=$('ttsProgressWrap');
+const ttsProgressFill=$('ttsProgressFill');
+const ttsProgressLabel=$('ttsProgressLabel');
+const ttsStatus     = $('ttsStatus');
+const clearHistoryBtn=$('clearHistoryBtn');
+const skillsList    = $('skillsList');
+const addSkillBtn   = $('addSkillBtn');
+const skillForm     = $('skillForm');
+const sName         = $('sName');
+const sTrigger      = $('sTrigger');
+const sCode         = $('sCode');
+const saveSkillBtn  = $('saveSkillBtn');
+const cancelSkillBtn= $('cancelSkillBtn');
 
 // ══════════════════════════════════════════════════════════════
-//  IndexedDB — хранение GGUF blob между сессиями
+//  IndexedDB — хранение GGUF blob
 // ══════════════════════════════════════════════════════════════
-async function openDB() {
-  return new Promise((res, rej) => {
-    const req = indexedDB.open('jarvis-store', 1);
-    req.onupgradeneeded = e => {
-      e.target.result.createObjectStore('blobs', { keyPath: 'id' });
-    };
-    req.onsuccess = e => res(e.target.result);
-    req.onerror   = () => rej(req.error);
-  });
-}
+const openDB = () => new Promise((res,rej) => {
+  const r = indexedDB.open('jarvis-db',1);
+  r.onupgradeneeded = e => e.target.result.createObjectStore('store',{keyPath:'id'});
+  r.onsuccess = e => res(e.target.result);
+  r.onerror   = () => rej(r.error);
+});
 
-async function saveBlob(id, blob, meta = {}) {
+async function dbPut(id, value) {
   const db = await openDB();
-  return new Promise((res, rej) => {
-    const tx  = db.transaction('blobs', 'readwrite');
-    tx.objectStore('blobs').put({ id, blob, ...meta, saved: Date.now() });
-    tx.oncomplete = res;
-    tx.onerror    = () => rej(tx.error);
+  return new Promise((res,rej) => {
+    const tx = db.transaction('store','readwrite');
+    tx.objectStore('store').put({id,...value});
+    tx.oncomplete=res; tx.onerror=()=>rej(tx.error);
   });
 }
 
-async function loadBlob(id) {
-  const db = await openDB();
-  return new Promise((res) => {
-    const req = db.transaction('blobs', 'readonly').objectStore('blobs').get(id);
-    req.onsuccess = e => res(e.target.result || null);
-    req.onerror   = () => res(null);
-  });
-}
-
-async function deleteBlob(id) {
+async function dbGet(id) {
   const db = await openDB();
   return new Promise(res => {
-    const tx = db.transaction('blobs', 'readwrite');
-    tx.objectStore('blobs').delete(id);
-    tx.oncomplete = res;
+    const r = db.transaction('store','readonly').objectStore('store').get(id);
+    r.onsuccess = e => res(e.target.result||null);
+    r.onerror   = () => res(null);
+  });
+}
+
+async function dbDel(id) {
+  const db = await openDB();
+  return new Promise(res => {
+    const tx = db.transaction('store','readwrite');
+    tx.objectStore('store').delete(id);
+    tx.oncomplete=res;
   });
 }
 
 // ══════════════════════════════════════════════════════════════
-//  GGUF MODEL MANAGER (wllama)
+//  ИСТОРИЯ ЧАТА (localStorage)
 // ══════════════════════════════════════════════════════════════
-async function loadGGUF(blob, filename) {
-  modelProgressWrap.hidden = false;
-  modelProgressFill.style.width = '0%';
-  modelProgressLabel.textContent = 'Инициализация wllama...';
-  modelStatus.textContent = '';
-  pickModelBtn.disabled   = true;
+const MAX_HISTORY = 120;
 
-  try {
-    // Динамический импорт wllama
-    const { Wllama } = await import('https://esm.sh/@wllama/wllama@2');
-
-    if (llm) { try { await llm.exit(); } catch {} }
-    llm = new Wllama(WLLAMA);
-
-    // Blob → URL → wllama
-    const url = URL.createObjectURL(blob);
-    modelProgressLabel.textContent = 'Загрузка модели в WASM...';
-
-    await llm.loadModelFromUrl(url, {
-      n_ctx:     1024,
-      n_threads: 2,
-    });
-
-    URL.revokeObjectURL(url);
-
-    llmReady = true;
-    modelProgressFill.style.width  = '100%';
-    modelProgressLabel.textContent = '100%';
-    modelStatus.textContent  = `✓ ${filename} активна`;
-    statusText.textContent   = filename.replace('.gguf', '');
-    pickModelBtn.textContent = `✓ ${filename}`;
-
-    // Сохраняем в IndexedDB для следующего запуска
-    modelStatus.textContent = `✓ ${filename} — сохраняю...`;
-    await saveBlob('gguf_model', blob, { filename });
-    modelStatus.textContent = `✓ ${filename} — сохранена офлайн`;
-
-    addMsg(`✓ Модель ${filename} загружена и сохранена!`, 'system');
-
-  } catch (e) {
-    modelStatus.textContent = '❌ ' + (e.message || String(e));
-    pickModelBtn.disabled   = false;
-    pickModelBtn.textContent = '📂 Открыть GGUF файл';
-  }
+function histLoad() {
+  try { return JSON.parse(localStorage.getItem('jarvis_history')||'[]'); }
+  catch { return []; }
 }
 
-// Авто-восстановление при старте
-async function tryRestoreModel() {
-  const stored = await loadBlob('gguf_model');
-  if (!stored?.blob) return;
-
-  modelStatus.textContent  = `⏳ Восстановление ${stored.filename}...`;
-  pickModelBtn.disabled    = true;
-
-  try {
-    const { Wllama } = await import('https://esm.sh/@wllama/wllama@2');
-    if (llm) { try { await llm.exit(); } catch {} }
-    llm = new Wllama(WLLAMA);
-
-    const url = URL.createObjectURL(stored.blob);
-    await llm.loadModelFromUrl(url, { n_ctx: 1024, n_threads: 2 });
-    URL.revokeObjectURL(url);
-
-    llmReady = true;
-    statusText.textContent   = stored.filename.replace('.gguf', '');
-    modelStatus.textContent  = `✓ ${stored.filename} — офлайн`;
-    pickModelBtn.textContent = `✓ ${stored.filename}`;
-    addMsg(`✓ Модель ${stored.filename} восстановлена`, 'system');
-
-  } catch (e) {
-    await deleteBlob('gguf_model');
-    modelStatus.textContent  = '⚠ Не удалось восстановить модель — выбери файл снова';
-    pickModelBtn.disabled    = false;
-    pickModelBtn.textContent = '📂 Открыть GGUF файл';
-  }
+function histSave(msgs) {
+  localStorage.setItem('jarvis_history', JSON.stringify(msgs.slice(-MAX_HISTORY)));
 }
 
-// Генерация ответа через wllama
-async function generateWithLLM(text) {
-  if (!llm || !llmReady) return null;
-  try {
-    const prompt = buildPrompt(text);
-    return await llm.createCompletion(prompt, {
-      nPredict:    200,
-      temperature: 0.7,
-      stop:        ['<|im_end|>', '<|endoftext|>', '\n<|im_start|>'],
-    });
-  } catch { return null; }
+function histAdd(role, text) {
+  const h = histLoad();
+  h.push({role, text, time: Date.now()});
+  histSave(h);
+}
+
+function histClear() {
+  localStorage.removeItem('jarvis_history');
+  chat.innerHTML = '';
+  addMsg('История очищена', 'system', false);
 }
 
 // ══════════════════════════════════════════════════════════════
-//  TTS — офлайн русский голос (Xenova/mms-tts-rus)
+//  CHAT UI
 // ══════════════════════════════════════════════════════════════
-async function downloadTTS() {
-  ttsDownloadBtn.disabled = true;
-  ttsProgressWrap.hidden  = false;
-  ttsStatus.textContent   = '';
+function addMsg(text, role='jarvis', save=true) {
+  const wrap = document.createElement('div');
+  wrap.className = `msg ${role}`;
 
-  try {
-    const { pipeline } = await import(
-      'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3'
-    );
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.textContent = text;
+  wrap.appendChild(bubble);
 
-    ttsEngine = await pipeline('text-to-speech', 'Xenova/mms-tts-rus', {
-      progress_callback: (p) => {
-        if (p.status === 'progress') {
-          const pct = Math.round(p.progress || 0);
-          ttsProgressFill.style.width  = pct + '%';
-          ttsProgressLabel.textContent = `${pct}%`;
-        }
-      }
-    });
-
-    ttsReady = true;
-    localStorage.setItem('jarvis_tts', '1');
-    ttsProgressFill.style.width  = '100%';
-    ttsProgressLabel.textContent = '100%';
-    ttsStatus.textContent        = '✓ Голос загружен — офлайн';
-    ttsDownloadBtn.textContent   = '✓ Голос активен';
-    addMsg('✓ Офлайн голос готов — больше не нужен Safari TTS!', 'system');
-
-  } catch (e) {
-    ttsStatus.textContent   = '❌ ' + e.message;
-    ttsDownloadBtn.disabled = false;
-    ttsDownloadBtn.textContent = '⬇ Попробовать снова';
+  if (role === 'user' || role === 'jarvis' || role === 'skill') {
+    const t = document.createElement('div');
+    t.className = 'msg-time';
+    t.textContent = new Date().toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
+    wrap.appendChild(t);
   }
+
+  chat.appendChild(wrap);
+  wrap.scrollIntoView({behavior:'smooth',block:'end'});
+
+  if (save && (role==='user'||role==='jarvis'||role==='skill')) histAdd(role, text);
 }
 
-async function tryRestoreTTS() {
-  if (!localStorage.getItem('jarvis_tts')) return;
-  ttsStatus.textContent = '⏳ Восстановление голоса...';
-  try {
-    const { pipeline } = await import(
-      'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3'
-    );
-    ttsEngine = await pipeline('text-to-speech', 'Xenova/mms-tts-rus');
-    ttsReady  = true;
-    ttsStatus.textContent      = '✓ Голос активен — офлайн';
-    ttsDownloadBtn.textContent = '✓ Голос активен';
-    ttsDownloadBtn.disabled    = true;
-  } catch {
-    localStorage.removeItem('jarvis_tts');
-    ttsStatus.textContent = '';
-  }
-}
-
-// Воспроизведение Float32Array через Web Audio API
-async function playAudio(audioArray, sampleRate) {
-  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  if (audioCtx.state === 'suspended') await audioCtx.resume();
-
-  const buffer = audioCtx.createBuffer(1, audioArray.length, sampleRate);
-  buffer.copyToChannel(new Float32Array(audioArray), 0);
-
-  const source = audioCtx.createBufferSource();
-  source.buffer = buffer;
-  source.connect(audioCtx.destination);
-
-  return new Promise(resolve => {
-    source.onended = resolve;
-    source.start(0);
+function renderHistory() {
+  const h = histLoad();
+  if (!h.length) return;
+  const d = document.createElement('div');
+  d.className='history-divider';
+  d.textContent=`— предыдущие ${h.length} сообщений —`;
+  chat.appendChild(d);
+  h.forEach(m => {
+    const wrap=document.createElement('div'); wrap.className=`msg ${m.role}`;
+    const b=document.createElement('div'); b.className='bubble'; b.textContent=m.text;
+    const t=document.createElement('div'); t.className='msg-time';
+    t.textContent=new Date(m.time).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
+    wrap.appendChild(b); wrap.appendChild(t); chat.appendChild(wrap);
   });
+  chat.scrollTop = chat.scrollHeight;
 }
 
-// Главная функция озвучивания
-async function speak(text) {
-  setState('speaking');
-
-  // 1. Офлайн TTS (приоритет — работает везде)
-  if (ttsReady && ttsEngine) {
-    try {
-      const out = await ttsEngine(text);
-      await playAudio(out.audio, out.sampling_rate);
-      setState('idle');
-      return;
-    } catch (e) {
-      console.warn('Custom TTS error:', e);
-    }
+// ══════════════════════════════════════════════════════════════
+//  СКИЛЛЫ
+// ══════════════════════════════════════════════════════════════
+const BUILTIN = [
+  {
+    name: 'Поиск в интернете',
+    trigger: 'найди,поищи,поиск,ищи,погода,новости,search',
+    builtin: true,
+    code: `const stop=/найди|поищи|ищи|поиск|search|в интернете/gi;
+const q=input.replace(stop,'').trim()||input.trim();
+window.open('https://duckduckgo.com/?q='+encodeURIComponent(q),'_blank');
+return 'Открываю поиск: "'+q+'"';`
   }
+];
 
-  // 2. Фолбэк: Web Speech API с iOS-фиксами
-  await speakWebSpeech(text);
-}
-
-// Web Speech API с тремя уровнями защиты от iOS-багов
-let speechPrimed = false;
-setInterval(() => { if (window.speechSynthesis?.paused) window.speechSynthesis.resume(); }, 5000);
-
-function speakWebSpeech(text) {
-  return new Promise(resolve => {
-    if (!window.speechSynthesis) { setState('idle'); return resolve(); }
-    if (!speechPrimed) {
-      const s = new SpeechSynthesisUtterance(' '); s.volume = 0; s.rate = 10;
-      window.speechSynthesis.speak(s);
-      speechPrimed = true;
-    }
-    window.speechSynthesis.cancel();
-
-    const run = () => {
-      const u = new SpeechSynthesisUtterance(text);
-      u.lang = 'ru-RU'; u.rate = 1.0; u.pitch = 0.88; u.volume = 1;
-      const ruVoice = window.speechSynthesis.getVoices().find(v => v.lang.startsWith('ru'));
-      if (ruVoice) u.voice = ruVoice;
-
-      let done = false;
-      const finish = () => { if (!done) { done = true; setState('idle'); resolve(); } };
-      u.onend = finish; u.onerror = finish;
-      setTimeout(finish, Math.max(4000, text.length * 70 + 3000));
-      window.speechSynthesis.speak(u);
-    };
-    setTimeout(run, 120);
-  });
-}
-
-// ══════════════════════════════════════════════════════════════
-//  SKILLS MANAGER
-// ══════════════════════════════════════════════════════════════
 const Skills = {
-  load()      { return JSON.parse(localStorage.getItem('jarvis_skills') || '[]'); },
-  save(list)  { localStorage.setItem('jarvis_skills', JSON.stringify(list)); },
+  load()     { return JSON.parse(localStorage.getItem('jarvis_skills')||'[]'); },
+  save(list) { localStorage.setItem('jarvis_skills', JSON.stringify(list)); },
+
+  all()      { return [...BUILTIN, ...this.load()]; },
+
   add(name, trigger, code) {
     const list = this.load();
-    const idx  = list.findIndex(s => s.name === name);
-    const item = { name, trigger: trigger.toLowerCase(), code, created: Date.now() };
-    if (idx >= 0) list[idx] = item; else list.push(item);
+    const idx  = list.findIndex(s=>s.name===name);
+    const item = {name, trigger:trigger.toLowerCase(), code, created:Date.now()};
+    if(idx>=0) list[idx]=item; else list.push(item);
     this.save(list); renderSkills(); return item;
   },
-  remove(name)  { this.save(this.load().filter(s => s.name !== name)); renderSkills(); },
-  tryRun(text)  {
+
+  remove(name) {
+    this.save(this.load().filter(s=>s.name!==name));
+    renderSkills();
+  },
+
+  async tryRun(text) {
     const t = text.toLowerCase();
-    for (const s of this.load()) {
-      if (t.includes(s.trigger)) {
-        try { return new Function('input', s.code)(text); }
-        catch (e) { return `Ошибка скилла «${s.name}»: ${e.message}`; }
+    for (const s of this.all()) {
+      const triggers = s.trigger.split(',').map(x=>x.trim());
+      if (triggers.some(tr=>tr&&t.includes(tr))) {
+        try {
+          const fn = new AsyncFn('input', s.code);
+          return await fn(text);
+        } catch(e) { return `Ошибка скилла «${s.name}»: ${e.message}`; }
       }
     }
     return null;
@@ -349,207 +212,367 @@ const Skills = {
 };
 
 function renderSkills() {
-  const list = Skills.load();
-  if (!list.length) {
-    skillsList.innerHTML = '<div class="empty-hint">Нет скиллов</div>';
-    return;
-  }
-  skillsList.innerHTML = list.map(s => `
-    <div class="skill-item">
-      <div class="skill-info">
-        <div class="skill-name">${s.name}</div>
-        <div class="skill-trigger">«${s.trigger}»</div>
+  const list = Skills.all();
+  if(!list.length){skillsList.innerHTML='<div class="empty-hint">Нет скиллов</div>';return;}
+  skillsList.innerHTML = list.map(s=>`
+    <div class="skill-card" data-name="${s.name}">
+      <div class="skill-card-top">
+        <div>
+          <div class="skill-name">${s.name} ${s.builtin?'<span class="skill-builtin">встроен</span>':''}</div>
+          <div class="skill-trigger">триггеры: ${s.trigger}</div>
+        </div>
       </div>
-      <button class="skill-del" data-name="${s.name}">✕</button>
+      <div class="skill-actions">
+        <button class="skill-btn run" data-action="run" data-name="${s.name}">▶ Запустить</button>
+        ${!s.builtin?`
+        <button class="skill-btn" data-action="edit" data-name="${s.name}">✏ Изменить</button>
+        <button class="skill-btn" data-action="del"  data-name="${s.name}">✕ Удалить</button>`:''}
+      </div>
     </div>`).join('');
-  skillsList.querySelectorAll('.skill-del').forEach(b =>
-    b.addEventListener('click', () => Skills.remove(b.dataset.name))
-  );
+
+  skillsList.querySelectorAll('[data-action]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const {action,name} = btn.dataset;
+      if(action==='del') { if(confirm(`Удалить скилл «${name}»?`)) Skills.remove(name); }
+      else if(action==='run') {
+        const input = prompt(`Тестовый ввод для «${name}»:`);
+        if(input!==null) Skills.tryRun(input).then(r=>r&&addMsg('[skill] '+r,'skill'));
+      }
+      else if(action==='edit') {
+        const all=Skills.all(); const s=all.find(x=>x.name===name);
+        if(!s) return;
+        editingSkillName=name; sName.value=s.name; sTrigger.value=s.trigger; sCode.value=s.code;
+        skillForm.hidden=false; sName.focus();
+      }
+    });
+  });
 }
 
 // ══════════════════════════════════════════════════════════════
-//  ОФЛАЙН КОМАНДЫ
+//  БЫСТРЫЕ ОФЛАЙН ОТВЕТЫ
 // ══════════════════════════════════════════════════════════════
 function offlineReply(text) {
   const t = text.toLowerCase();
-  if (/(\bвремя\b|который час)/.test(t))
+  if(/(\bвремя\b|который час|сколько время)/.test(t))
     return `Сейчас ${new Date().toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'})}.`;
-  if (/(\bдата\b|какое число|какой день|сегодня)/.test(t))
+  if(/(\bдата\b|какое число|какой день|сегодня)/.test(t))
     return `Сегодня ${new Date().toLocaleDateString('ru-RU',{weekday:'long',day:'numeric',month:'long'})}.`;
-  if (/привет|здравствуй|хай/.test(t))   return 'Привет! Чем могу помочь?';
-  if (/как (ты|дела)/.test(t))            return 'Отлично, готов работать!';
-  if (/(кто ты|как тебя зовут)/.test(t)) return 'Я Jarvis, твой голосовой ассистент.';
-  if (/спасибо|благодарю/.test(t))        return 'Пожалуйста!';
+  if(/привет|здравствуй|хай/.test(t))   return 'Привет! Чем могу помочь?';
+  if(/как (ты|дела)/.test(t))            return 'Отлично, готов работать!';
+  if(/(кто ты|как тебя зовут)/.test(t)) return 'Я Jarvis, офлайн ассистент.';
+  if(/спасибо|благодарю/.test(t))        return 'Пожалуйста!';
   return null;
 }
 
 // ══════════════════════════════════════════════════════════════
-//  CLAUDE API
+//  МОДЕЛЬ (wllama + GGUF)
 // ══════════════════════════════════════════════════════════════
-async function askClaude(text) {
-  if (!apiKey) return null;
+const WLLAMA_CDN = {
+  'single-thread/wllama.js':  'https://cdn.jsdelivr.net/npm/@wllama/wllama/dist/single-thread/wllama.js',
+  'single-thread/wllama.wasm':'https://cdn.jsdelivr.net/npm/@wllama/wllama/dist/single-thread/wllama.wasm',
+};
+
+async function loadGGUF(blob, filename) {
+  modelProgressWrap.hidden=false; modelProgressFill.style.width='0%';
+  modelProgressLabel.textContent='Инициализация...';
+  modelStatus.textContent=''; pickModelBtn.disabled=true;
+
   try {
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01'},
-      body: JSON.stringify({model:'claude-haiku-4-5',max_tokens:200,
-        system:SYSTEM,messages:[{role:'user',content:text}]})
-    });
-    const d = await r.json();
-    return d.content?.[0]?.text?.trim() || null;
-  } catch { return null; }
-}
+    const {Wllama} = await import('https://esm.sh/@wllama/wllama@2');
+    if(llm){try{await llm.exit();}catch{}}
+    llm = new Wllama(WLLAMA_CDN);
 
-// ══════════════════════════════════════════════════════════════
-//  АВТО-СОЗДАНИЕ СКИЛЛОВ
-// ══════════════════════════════════════════════════════════════
-async function handleReply(raw) {
-  const m = raw.match(/\{"create_skill":\{.*?\}\}/s);
-  if (m) {
-    try {
-      const cs = JSON.parse(m[0]).create_skill;
-      Skills.add(cs.name, cs.trigger, cs.code);
-      const msg = `✓ Скилл «${cs.name}» создан! Скажи «${cs.trigger}».`;
-      addMsg(msg, 'jarvis'); await speak(msg); return;
-    } catch {}
+    modelProgressLabel.textContent='Загрузка в WASM...';
+    const url = URL.createObjectURL(blob);
+    await llm.loadModelFromUrl(url,{n_ctx:1024,n_threads:2});
+    URL.revokeObjectURL(url);
+
+    llmReady=true;
+    modelProgressFill.style.width='100%';
+    modelProgressLabel.textContent='100%';
+    modelStatus.textContent=`✓ ${filename} активна`;
+    statusText.textContent=filename.replace(/\.gguf$/i,'').slice(0,20);
+    pickModelBtn.textContent=`✓ ${filename}`;
+
+    modelStatus.textContent=`✓ ${filename} — сохраняю...`;
+    await dbPut('gguf',{blob,filename});
+    modelStatus.textContent=`✓ ${filename} — офлайн`;
+    addMsg(`Модель ${filename} загружена ✓`,'system');
+
+  } catch(e) {
+    modelStatus.textContent='❌ '+e.message;
+    pickModelBtn.disabled=false; pickModelBtn.textContent='📂 Открыть файл';
   }
-  addMsg(raw, 'jarvis');
-  await speak(raw);
+}
+
+async function tryRestoreModel() {
+  const r = await dbGet('gguf');
+  if(!r?.blob) return;
+  modelProgressWrap.hidden=false; modelProgressLabel.textContent='Восстановление...';
+  pickModelBtn.disabled=true;
+  try {
+    const {Wllama} = await import('https://esm.sh/@wllama/wllama@2');
+    if(llm){try{await llm.exit();}catch{}}
+    llm = new Wllama(WLLAMA_CDN);
+    const url=URL.createObjectURL(r.blob);
+    await llm.loadModelFromUrl(url,{n_ctx:1024,n_threads:2});
+    URL.revokeObjectURL(url);
+    llmReady=true;
+    modelProgressFill.style.width='100%'; modelProgressLabel.textContent='100%';
+    statusText.textContent=(r.filename||'model').replace(/\.gguf$/i,'').slice(0,20);
+    modelStatus.textContent=`✓ ${r.filename} — офлайн`;
+    pickModelBtn.textContent=`✓ ${r.filename}`;
+    addMsg(`Модель ${r.filename} восстановлена ✓`,'system');
+  } catch{
+    await dbDel('gguf');
+    modelProgressWrap.hidden=true; modelStatus.textContent='⚠ Не удалось восстановить — выбери файл снова';
+    pickModelBtn.disabled=false; pickModelBtn.textContent='📂 Открыть файл';
+  }
+}
+
+async function generateLLM(text) {
+  if(!llm||!llmReady) return null;
+  try {
+    return await llm.createCompletion(buildPrompt(text),{
+      nPredict:200,temperature:0.7,stop:['<|im_end|>','<|endoftext|>','\n<|im_start|>']
+    });
+  } catch{return null;}
 }
 
 // ══════════════════════════════════════════════════════════════
-//  ОСНОВНОЙ ЦИКЛ АГЕНТА
+//  TTS (mms-tts-rus через Transformers.js)
+// ══════════════════════════════════════════════════════════════
+async function downloadTTS() {
+  ttsBtn.disabled=true; ttsProgressWrap.hidden=false; ttsStatus.textContent='';
+  try {
+    const {pipeline} = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3');
+    ttsEngine = await pipeline('text-to-speech','Xenova/mms-tts-rus',{
+      progress_callback: p=>{
+        if(p.status==='progress'){
+          const pct=Math.round(p.progress||0);
+          ttsProgressFill.style.width=pct+'%'; ttsProgressLabel.textContent=pct+'%';
+        }
+      }
+    });
+    ttsReady=true; localStorage.setItem('jarvis_tts','1');
+    ttsProgressFill.style.width='100%'; ttsProgressLabel.textContent='100%';
+    ttsStatus.textContent='✓ Голос загружен — офлайн';
+    ttsBtn.textContent='✓ Голос активен';
+    addMsg('Офлайн голос готов ✓','system');
+  } catch(e){
+    ttsStatus.textContent='❌ '+e.message;
+    ttsBtn.disabled=false; ttsBtn.textContent='⬇ Загрузить голос (~270 МБ)';
+  }
+}
+
+async function tryRestoreTTS() {
+  if(!localStorage.getItem('jarvis_tts')) return;
+  ttsStatus.textContent='⏳ Восстановление голоса...';
+  try {
+    const {pipeline} = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3');
+    ttsEngine = await pipeline('text-to-speech','Xenova/mms-tts-rus');
+    ttsReady=true; ttsStatus.textContent='✓ Голос активен';
+    ttsBtn.textContent='✓ Голос активен'; ttsBtn.disabled=true;
+  } catch{localStorage.removeItem('jarvis_tts'); ttsStatus.textContent='';}
+}
+
+async function playFloat32(audio, sampleRate) {
+  if(!audioCtx) audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+  if(audioCtx.state==='suspended') await audioCtx.resume();
+  const buf=audioCtx.createBuffer(1,audio.length,sampleRate);
+  buf.copyToChannel(new Float32Array(audio),0);
+  const src=audioCtx.createBufferSource();
+  src.buffer=buf; src.connect(audioCtx.destination);
+  return new Promise(r=>{src.onended=r; src.start(0);});
+}
+
+// ── iOS Web Speech фолбэк ────────────────────────────────────
+let speechPrimed=false;
+setInterval(()=>{if(window.speechSynthesis?.paused)window.speechSynthesis.resume();},5000);
+
+function speakWebSpeech(text){
+  return new Promise(res=>{
+    if(!window.speechSynthesis){setState('idle');return res();}
+    if(!speechPrimed){const u=new SpeechSynthesisUtterance('');u.volume=0;window.speechSynthesis.speak(u);speechPrimed=true;}
+    window.speechSynthesis.cancel();
+    const run=()=>{
+      const u=new SpeechSynthesisUtterance(text);
+      u.lang='ru-RU';u.rate=1.0;u.pitch=0.88;u.volume=1;
+      const rv=window.speechSynthesis.getVoices().find(v=>v.lang.startsWith('ru'));
+      if(rv)u.voice=rv;
+      let done=false; const fin=()=>{if(!done){done=true;setState('idle');res();}};
+      u.onend=fin;u.onerror=fin;
+      setTimeout(fin,Math.max(4000,text.length*70+3000));
+      window.speechSynthesis.speak(u);
+    };
+    setTimeout(run,120);
+  });
+}
+
+async function speak(text) {
+  setState('speaking');
+  if(ttsReady&&ttsEngine){
+    try{const o=await ttsEngine(text);await playFloat32(o.audio,o.sampling_rate);setState('idle');return;}
+    catch(e){console.warn('TTS err:',e);}
+  }
+  await speakWebSpeech(text);
+}
+
+// ══════════════════════════════════════════════════════════════
+//  ОСНОВНОЙ ЦИКЛ
 // ══════════════════════════════════════════════════════════════
 async function handleInput(text) {
-  addMsg(text, 'user');
+  if(!text.trim()) return;
+  addMsg(text,'user');
   setState('thinking');
 
-  const skill = Skills.tryRun(text);
-  if (skill !== null) { addMsg(skill, 'jarvis'); await speak(skill); return; }
-
-  const quick = offlineReply(text);
-  if (quick) { addMsg(quick, 'jarvis'); await speak(quick); return; }
-
-  if (llmReady) {
-    const local = await generateWithLLM(text);
-    if (local) { await handleReply(local); return; }
+  // 1. Скиллы
+  const sr = await Skills.tryRun(text);
+  if(sr!==null){
+    addMsg(sr,'skill'); await speak(sr); return;
   }
 
-  if (apiKey) {
-    const cloud = await askClaude(text);
-    if (cloud) { await handleReply(cloud); return; }
+  // 2. Быстрые ответы
+  const qr = offlineReply(text);
+  if(qr){addMsg(qr,'jarvis'); await speak(qr); return;}
+
+  // 3. Локальная модель
+  if(llmReady){
+    const raw=await generateLLM(text);
+    if(raw){
+      // Попытка распарсить create_skill
+      const m=raw.match(/\{"create_skill":\{.*?\}\}/s);
+      if(m){
+        try{
+          const cs=JSON.parse(m[0]).create_skill;
+          Skills.add(cs.name,cs.trigger,cs.code);
+          const msg=`✓ Скилл «${cs.name}» создан! Скажи «${cs.trigger.split(',')[0]}».`;
+          addMsg(msg,'skill'); await speak(msg); return;
+        }catch{}
+      }
+      addMsg(raw,'jarvis'); await speak(raw); return;
+    }
   }
 
-  const fb = llmReady
-    ? 'Не смог ответить — попробуй переформулировать.'
-    : 'Открой GGUF файл в настройках ⚙ для офлайн ответов.';
-  addMsg(fb, 'jarvis'); await speak(fb);
+  const fb='Загрузи GGUF модель в настройках ⚙ для умных ответов.';
+  addMsg(fb,'jarvis'); await speak(fb);
 }
 
 // ══════════════════════════════════════════════════════════════
-//  STATE + SPEECH RECOGNITION
+//  STATE
 // ══════════════════════════════════════════════════════════════
-const SL = {idle:'нажми чтобы говорить',listening:'слушаю...',thinking:'думаю...',speaking:'говорю...'};
-const ML = {idle:'Говорить',listening:'Стоп',thinking:'...',speaking:'Прервать'};
-function setState(s) {
-  appState=s; app.dataset.state=s;
-  stateLabel.textContent=SL[s]??s; micLabel.textContent=ML[s]??s;
+const SL={idle:'',listening:'слушаю...',thinking:'думаю...',speaking:'говорю...'};
+function setState(s){
+  appState=s; app.dataset.state=s; stateLbl.textContent=SL[s]??s;
 }
 
-const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+// ══════════════════════════════════════════════════════════════
+//  SPEECH RECOGNITION
+// ══════════════════════════════════════════════════════════════
+const SR_API=window.SpeechRecognition||window.webkitSpeechRecognition;
 
-function startListening() {
-  if (!speechPrimed) { const u=new SpeechSynthesisUtterance(''); u.volume=0; window.speechSynthesis?.speak(u); speechPrimed=true; }
-  if (appState==='listening') { stopListening(); return; }
-  if (appState==='speaking')  { window.speechSynthesis?.cancel(); if(audioCtx) { try{audioCtx.suspend();}catch{} } setState('idle'); return; }
-  if (appState==='thinking')  { return; }
-  if (!SR) { addMsg('⚠️ Web Speech API не поддерживается в этом браузере.','system'); return; }
-
-  recognition = new SR();
+function startListening(){
+  if(!speechPrimed){const u=new SpeechSynthesisUtterance('');u.volume=0;window.speechSynthesis?.speak(u);speechPrimed=true;}
+  if(appState==='listening'){try{recognition?.stop();}catch{}recognition=null;setState('idle');return;}
+  if(appState==='speaking'){window.speechSynthesis?.cancel();setState('idle');return;}
+  if(appState==='thinking') return;
+  if(!SR_API){addMsg('⚠️ Web Speech не поддерживается в этом браузере.','system');return;}
+  recognition=new SR_API();
   recognition.lang='ru-RU'; recognition.interimResults=false; recognition.continuous=false;
-  recognition.onstart  = () => setState('listening');
-  recognition.onresult = (e) => { stopListening(false); handleInput(e.results[0][0].transcript); };
-  recognition.onerror  = (e) => {
-    if (e.error==='not-allowed') addMsg('⚠️ Нет доступа к микрофону.','system');
-    else if (e.error==='no-speech') addMsg('Не услышал — нажми ещё раз.','system');
-    else if (e.error!=='aborted') addMsg(`⚠️ Ошибка: ${e.error}`,'system');
-    stopListening();
+  recognition.onstart=()=>setState('listening');
+  recognition.onresult=e=>{const t=e.results[0][0].transcript;try{recognition.stop();}catch{}recognition=null;handleInput(t);};
+  recognition.onerror=e=>{
+    if(e.error==='not-allowed') addMsg('⚠️ Нет доступа к микрофону.','system');
+    else if(e.error!=='aborted'&&e.error!=='no-speech') addMsg(`⚠️ Ошибка: ${e.error}`,'system');
+    setState('idle');
   };
-  recognition.onend = () => { if(appState==='listening') setState('idle'); recognition=null; };
-  try { recognition.start(); } catch { setState('idle'); }
-}
-
-function stopListening(reset=true) {
-  try { recognition?.stop(); } catch {} recognition=null;
-  if (reset) setState('idle');
-}
-
-// ══════════════════════════════════════════════════════════════
-//  CHAT UI
-// ══════════════════════════════════════════════════════════════
-function addMsg(text, role='jarvis') {
-  const el=document.createElement('div');
-  el.className=`msg ${role}`; el.textContent=text;
-  chat.appendChild(el);
-  el.scrollIntoView({behavior:'smooth',block:'end'});
+  recognition.onend=()=>{if(appState==='listening')setState('idle'); recognition=null;};
+  try{recognition.start();}catch{setState('idle');}
 }
 
 // ══════════════════════════════════════════════════════════════
 //  СОБЫТИЯ
 // ══════════════════════════════════════════════════════════════
+
+// Отправка текста
+function sendText(){
+  const t=textInput.value.trim();
+  if(!t) return;
+  textInput.value=''; textInput.style.height=''; handleInput(t);
+}
+sendBtn.addEventListener('click', sendText);
+textInput.addEventListener('keydown', e=>{
+  if(e.key==='Enter'&&!e.shiftKey){e.preventDefault(); sendText();}
+});
+// Авторост textarea
+textInput.addEventListener('input',()=>{
+  textInput.style.height='auto';
+  textInput.style.height=Math.min(textInput.scrollHeight,120)+'px';
+});
+
 micBtn.addEventListener('click', startListening);
-orbWrapper.addEventListener('click', startListening);
 
-settingsToggle.addEventListener('click', () => {
+// Панели
+btnSettings.addEventListener('click',()=>{
   settingsPanel.hidden=!settingsPanel.hidden; skillsPanel.hidden=true;
+  btnSettings.style.color=settingsPanel.hidden?'':'var(--accent)';
+  btnSkills.style.color='';
 });
-apiKeyInput.addEventListener('change', () => {
-  apiKey=apiKeyInput.value.trim(); localStorage.setItem('jarvis_key', apiKey);
-  if (!llmReady) statusText.textContent=apiKey?'Claude':'офлайн';
+btnSkills.addEventListener('click',()=>{
+  skillsPanel.hidden=!skillsPanel.hidden; settingsPanel.hidden=true;
+  btnSkills.style.color=skillsPanel.hidden?'':'var(--accent)';
+  btnSettings.style.color='';
+  renderSkills();
 });
 
-// Файловый пикер модели
-pickModelBtn.addEventListener('click', () => modelFilePicker.click());
-modelFilePicker.addEventListener('change', async (e) => {
-  const file = e.target.files?.[0];
-  if (!file) return;
-  await loadGGUF(file, file.name);
-  modelFilePicker.value = ''; // сбрасываем input
+// Модель
+pickModelBtn.addEventListener('click',()=>modelFilePicker.click());
+modelFilePicker.addEventListener('change',async e=>{
+  const f=e.target.files?.[0]; if(!f) return;
+  await loadGGUF(f,f.name); modelFilePicker.value='';
+});
+clearModelBtn.addEventListener('click',async()=>{
+  if(!confirm('Удалить сохранённую модель из памяти?')) return;
+  await dbDel('gguf'); llm=null; llmReady=false;
+  modelStatus.textContent='Модель удалена'; pickModelBtn.textContent='📂 Открыть файл';
+  pickModelBtn.disabled=false; modelProgressWrap.hidden=true;
+  statusText.textContent='офлайн';
 });
 
 // TTS
-ttsDownloadBtn.addEventListener('click', downloadTTS);
+ttsBtn.addEventListener('click',downloadTTS);
 
-// Табы
-tabChat.addEventListener('click', () => {
-  skillsPanel.hidden=true; settingsPanel.hidden=true;
-  tabChat.classList.add('active'); tabSkills.classList.remove('active');
-});
-tabSkills.addEventListener('click', () => {
-  skillsPanel.hidden=!skillsPanel.hidden; settingsPanel.hidden=true;
-  tabSkills.classList.toggle('active',!skillsPanel.hidden); renderSkills();
-});
+// История
+clearHistoryBtn.addEventListener('click',()=>{if(confirm('Очистить всю историю?'))histClear();});
 
-addSkillBtn.addEventListener('click', () => { skillForm.hidden=!skillForm.hidden; if(!skillForm.hidden) skillName.focus(); });
-cancelSkillBtn.addEventListener('click', () => { skillForm.hidden=true; skillName.value=skillTrigger.value=skillCode.value=''; });
-saveSkillBtn.addEventListener('click', () => {
-  const n=skillName.value.trim(), t=skillTrigger.value.trim(), c=skillCode.value.trim();
+// Скиллы
+addSkillBtn.addEventListener('click',()=>{
+  editingSkillName=null; sName.value=''; sTrigger.value=''; sCode.value='';
+  skillForm.hidden=!skillForm.hidden;
+  if(!skillForm.hidden) sName.focus();
+});
+cancelSkillBtn.addEventListener('click',()=>{skillForm.hidden=true; editingSkillName=null;});
+saveSkillBtn.addEventListener('click',()=>{
+  const n=sName.value.trim(),t=sTrigger.value.trim(),c=sCode.value.trim();
   if(!n||!t||!c){alert('Заполни все поля');return;}
-  Skills.add(n,t,c); skillForm.hidden=true; skillName.value=skillTrigger.value=skillCode.value='';
-  addMsg(`✓ Скилл «${n}» добавлен!`,'system');
+  if(editingSkillName&&editingSkillName!==n) Skills.remove(editingSkillName);
+  Skills.add(n,t,c); skillForm.hidden=true; editingSkillName=null;
+  addMsg(`Скилл «${n}» сохранён ✓`,'system');
 });
 
 // ══════════════════════════════════════════════════════════════
 //  СТАРТ
 // ══════════════════════════════════════════════════════════════
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(()=>{});
-if (window.speechSynthesis) {
+if('serviceWorker'in navigator) navigator.serviceWorker.register('./sw.js').catch(()=>{});
+if(window.speechSynthesis){
   window.speechSynthesis.getVoices();
-  window.speechSynthesis.addEventListener('voiceschanged', ()=>window.speechSynthesis.getVoices());
+  window.speechSynthesis.addEventListener('voiceschanged',()=>window.speechSynthesis.getVoices());
 }
 
-addMsg('Нажми на орб чтобы говорить','system');
+// Загружаем историю и рендерим скиллы
+renderHistory();
+renderSkills();
 
-// Авто-восстановление при старте (параллельно)
+// Авто-восстановление (параллельно, не блокирует)
 tryRestoreModel();
 tryRestoreTTS();
