@@ -274,33 +274,59 @@ const WLLAMA_CDN = {
 
 async function loadGGUF(blob, filename) {
   modelProgressWrap.hidden=false; modelProgressFill.style.width='0%';
-  modelProgressLabel.textContent='Инициализация...';
   modelStatus.textContent=''; pickModelBtn.disabled=true;
 
-  try {
-    const {Wllama} = await import('https://esm.sh/@wllama/wllama@2');
-    if(llm){try{await llm.exit();}catch{}}
-    llm = new Wllama(WLLAMA_CDN);
+  const step = (n, txt) => {
+    modelProgressLabel.textContent = `Шаг ${n}/4: ${txt}`;
+    modelProgressFill.style.width  = (n*22)+'%';
+    addMsg(`[${n}/4] ${txt}`, 'system', false);
+  };
 
-    modelProgressLabel.textContent='Загрузка в WASM...';
+  try {
+    // Шаг 1 — импорт библиотеки
+    step(1,'Загрузка wllama...');
+    let WllamaClass;
+    try {
+      const mod = await import('https://esm.sh/@wllama/wllama@2');
+      WllamaClass = mod.Wllama ?? mod.default?.Wllama ?? mod.default;
+      if (typeof WllamaClass !== 'function') throw new Error('Класс Wllama не найден в модуле');
+    } catch(e) { throw new Error('Шаг 1 — импорт: ' + e.message); }
+
+    // Шаг 2 — создание движка
+    step(2,'Инициализация движка...');
+    try {
+      if(llm){ try{await llm.exit();}catch{} }
+      llm = new WllamaClass(WLLAMA_CDN);
+    } catch(e) { throw new Error('Шаг 2 — движок: ' + e.message); }
+
+    // Шаг 3 — загрузка модели
+    step(3,'Загрузка модели в WASM...');
     const url = URL.createObjectURL(blob);
-    await llm.loadModelFromUrl(url,{n_ctx:1024,n_threads:2});
+    try {
+      await llm.loadModelFromUrl(url, {n_ctx:1024, n_threads:1});
+    } catch(e) {
+      URL.revokeObjectURL(url);
+      throw new Error('Шаг 3 — модель: ' + e.message);
+    }
     URL.revokeObjectURL(url);
 
+    // Шаг 4 — сохранение
+    step(4,'Сохранение в память...');
     llmReady=true;
     modelProgressFill.style.width='100%';
-    modelProgressLabel.textContent='100%';
-    modelStatus.textContent=`✓ ${filename} активна`;
-    statusText.textContent=filename.replace(/\.gguf$/i,'').slice(0,20);
+    modelProgressLabel.textContent='100% — готово';
+    modelStatus.textContent=`✓ ${filename} — офлайн`;
+    statusText.textContent=filename.replace(/\.gguf$/i,'').slice(0,18);
     pickModelBtn.textContent=`✓ ${filename}`;
 
-    modelStatus.textContent=`✓ ${filename} — сохраняю...`;
-    await dbPut('gguf',{blob,filename});
-    modelStatus.textContent=`✓ ${filename} — офлайн`;
-    addMsg(`Модель ${filename} загружена ✓`,'system');
+    try { await dbPut('gguf',{blob,filename}); }
+    catch(e) { addMsg('⚠ Не удалось сохранить в память (работает до перезагрузки): '+e.message,'system'); }
+
+    addMsg(`✓ Модель ${filename} загружена`,'system');
 
   } catch(e) {
     modelStatus.textContent='❌ '+e.message;
+    addMsg('❌ Ошибка: '+e.message,'system');
     pickModelBtn.disabled=false; pickModelBtn.textContent='📂 Открыть файл';
   }
 }
@@ -308,24 +334,28 @@ async function loadGGUF(blob, filename) {
 async function tryRestoreModel() {
   const r = await dbGet('gguf');
   if(!r?.blob) return;
-  modelProgressWrap.hidden=false; modelProgressLabel.textContent='Восстановление...';
+  modelProgressWrap.hidden=false;
+  modelProgressLabel.textContent='Восстановление из памяти...';
   pickModelBtn.disabled=true;
   try {
-    const {Wllama} = await import('https://esm.sh/@wllama/wllama@2');
+    const mod = await import('https://esm.sh/@wllama/wllama@2');
+    const WllamaClass = mod.Wllama ?? mod.default?.Wllama ?? mod.default;
     if(llm){try{await llm.exit();}catch{}}
-    llm = new Wllama(WLLAMA_CDN);
+    llm = new WllamaClass(WLLAMA_CDN);
     const url=URL.createObjectURL(r.blob);
-    await llm.loadModelFromUrl(url,{n_ctx:1024,n_threads:2});
+    await llm.loadModelFromUrl(url,{n_ctx:1024,n_threads:1});
     URL.revokeObjectURL(url);
     llmReady=true;
-    modelProgressFill.style.width='100%'; modelProgressLabel.textContent='100%';
-    statusText.textContent=(r.filename||'model').replace(/\.gguf$/i,'').slice(0,20);
+    modelProgressFill.style.width='100%';
+    modelProgressLabel.textContent='100%';
+    statusText.textContent=(r.filename||'model').replace(/\.gguf$/i,'').slice(0,18);
     modelStatus.textContent=`✓ ${r.filename} — офлайн`;
     pickModelBtn.textContent=`✓ ${r.filename}`;
-    addMsg(`Модель ${r.filename} восстановлена ✓`,'system');
-  } catch{
+    addMsg(`✓ Модель восстановлена из памяти`,'system');
+  } catch(e) {
     await dbDel('gguf');
-    modelProgressWrap.hidden=true; modelStatus.textContent='⚠ Не удалось восстановить — выбери файл снова';
+    modelProgressWrap.hidden=true;
+    modelStatus.textContent='⚠ Не удалось восстановить — выбери файл снова';
     pickModelBtn.disabled=false; pickModelBtn.textContent='📂 Открыть файл';
   }
 }
