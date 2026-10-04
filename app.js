@@ -268,8 +268,7 @@ function offlineReply(text) {
 //  МОДЕЛЬ (wllama + GGUF)
 // ══════════════════════════════════════════════════════════════
 const WLLAMA_CDN = {
-  'single-thread/wllama.js':  'https://cdn.jsdelivr.net/npm/@wllama/wllama/dist/single-thread/wllama.js',
-  'single-thread/wllama.wasm':'https://cdn.jsdelivr.net/npm/@wllama/wllama/dist/single-thread/wllama.wasm',
+  default: 'https://cdn.jsdelivr.net/npm/@wllama/wllama@3.8.1/esm/wasm/wllama.wasm',
 };
 
 async function loadGGUF(blob, filename) {
@@ -287,7 +286,7 @@ async function loadGGUF(blob, filename) {
     step(1,'Загрузка wllama...');
     let WllamaClass;
     try {
-      const mod = await import('https://esm.sh/@wllama/wllama@2');
+      const mod = await import('https://cdn.jsdelivr.net/npm/@wllama/wllama@3.8.1/esm/index.js');
       WllamaClass = mod.Wllama ?? mod.default?.Wllama ?? mod.default;
       if (typeof WllamaClass !== 'function') throw new Error('Класс Wllama не найден в модуле');
     } catch(e) { throw new Error('Шаг 1 — импорт: ' + e.message); }
@@ -338,7 +337,7 @@ async function tryRestoreModel() {
   modelProgressLabel.textContent='Восстановление из памяти...';
   pickModelBtn.disabled=true;
   try {
-    const mod = await import('https://esm.sh/@wllama/wllama@2');
+    const mod = await import('https://cdn.jsdelivr.net/npm/@wllama/wllama@3.8.1/esm/index.js');
     const WllamaClass = mod.Wllama ?? mod.default?.Wllama ?? mod.default;
     if(llm){try{await llm.exit();}catch{}}
     llm = new WllamaClass(WLLAMA_CDN);
