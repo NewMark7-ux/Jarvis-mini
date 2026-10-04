@@ -300,14 +300,11 @@ async function loadGGUF(blob, filename) {
 
     // Шаг 3 — загрузка модели
     step(3,'Загрузка модели в WASM...');
-    const url = URL.createObjectURL(blob);
     try {
-      await llm.loadModelFromUrl(url, {n_ctx:1024, n_threads:1});
+      await llm.loadModel([blob], {n_ctx:1024, n_threads:1});
     } catch(e) {
-      URL.revokeObjectURL(url);
       throw new Error('Шаг 3 — модель: ' + e.message);
     }
-    URL.revokeObjectURL(url);
 
     // Шаг 4 — сохранение
     step(4,'Сохранение в память...');
@@ -341,9 +338,7 @@ async function tryRestoreModel() {
     const WllamaClass = mod.Wllama ?? mod.default?.Wllama ?? mod.default;
     if(llm){try{await llm.exit();}catch{}}
     llm = new WllamaClass(WLLAMA_CDN);
-    const url=URL.createObjectURL(r.blob);
-    await llm.loadModelFromUrl(url,{n_ctx:1024,n_threads:1});
-    URL.revokeObjectURL(url);
+    await llm.loadModel([r.blob], {n_ctx:1024, n_threads:1});
     llmReady=true;
     modelProgressFill.style.width='100%';
     modelProgressLabel.textContent='100%';
