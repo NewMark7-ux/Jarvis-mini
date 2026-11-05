@@ -32,12 +32,12 @@
     <div class="side-panel-title">Настройки</div>
 
     <div class="section-label">🧠 Языковая модель (GGUF)</div>
-    <p class="hint">Скачай модель отдельно, открой здесь — сохранится в памяти приложения</p>
+    <p class="hint">Скачай модель отдельно, открой здесь — сохранится в памяти приложения.<br>На iOS выбирай любой файл (фильтр отключён специально).</p>
     <div class="row-btns">
       <button class="btn-primary" id="pickModelBtn">📂 Открыть файл</button>
       <button class="btn-danger sm" id="clearModelBtn" title="Удалить">✕</button>
     </div>
-    <input type="file" id="modelFilePicker" accept=".gguf,.bin,.ggml" hidden>
+    <input type="file" id="modelFilePicker" hidden>
     <div class="progress-wrap" id="modelProgressWrap" hidden>
       <div class="progress-bar"><div class="progress-fill" id="modelProgressFill"></div></div>
       <div class="progress-lbl" id="modelProgressLabel"></div>
@@ -46,6 +46,7 @@
     <div class="model-info" id="modelInfo" hidden></div>
     <p class="hint links">
       Скачать:
+      <a href="https://huggingface.co/ggml-org/gemma-3-1b-it-GGUF/resolve/main/gemma-3-1b-it-Q4_K_M.gguf" target="_blank">Gemma 3 1B</a> ·
       <a href="https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf" target="_blank">Qwen 0.5B</a> ·
       <a href="https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf" target="_blank">Qwen 1.5B</a>
     </p>
@@ -57,7 +58,7 @@
       <select id="promptTemplate" class="field select">
         <option value="chatml">ChatML (Qwen, many)</option>
         <option value="llama3">Llama 3 / 3.1 / 3.2</option>
-        <option value="gemma">Gemma 2</option>
+        <option value="gemma">Gemma 3</option>
         <option value="phi">Phi-3 / Phi-4</option>
         <option value="raw">Raw (без шаблона)</option>
       </select>
